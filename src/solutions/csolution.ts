@@ -449,6 +449,12 @@ export class CSolution {
         return this.clayerYmlRoot.get(absPath);
     }
 
+    public getClayersForContext(context?: string): CTreeItem[] {
+        const cbuild = this.getCbuildTop(context);
+        return (cbuild?.getRoot().getProperty('clayers') as CTreeItem[] | undefined) ?? [];
+    }
+
+
     /**
      * Returns first child of cproject.yml file for specified cbuild item
      * @param cbuild cbuild item (first child of cbuild.yml file)
