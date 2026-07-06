@@ -35,7 +35,7 @@ import { cloneDeep, uniqWith } from 'lodash';
 import { parsePackId } from './data/pack-parse';
 import { lineOf, readTextFile } from '../../utils/fs-utils';
 import { stripTwoExtensions } from '../../utils/string-utils';
-import { getLatestAvailablePacks } from '../../packs/index-pidx-file';
+import { getLatestAvailablePacksInfo, isPackIndexCurrent } from '../../packs/index-pidx-file';
 import { isDeepStrictEqual } from 'util';
 import { openFileWithPolicy } from '../file-open-policy';
 import { FileOpenGroupOrchestrator, FileOpenGroupOrchestratorImpl } from '../file-open-group-orchestrator';
@@ -106,6 +106,9 @@ export class ComponentsPacksWebviewMain {
     private isLoading = false;
     private readonly unlinkRequests: Set<string> = new Set<string>();
     private availablePacksCache: Record<string, string> = {}; // this cache must be invalidated, if a new pack was installed
+    // An empty cache can mean either "not loaded yet" or "loaded, but no packs matched the filter".
+    private availablePacksCacheLoaded = false;
+    private availablePacksIndexTimestamp?: string;
     private pendingFocusPackId?: string;
 
     constructor(
@@ -151,6 +154,8 @@ export class ComponentsPacksWebviewMain {
             this.usedItems = { components: [], packs: [], success: false };
             this.cachedTargetSetData = undefined;
             this.availablePacksCache = {};
+            this.availablePacksCacheLoaded = false;
+            this.availablePacksIndexTimestamp = undefined;
             this.unlinkRequests.clear();
             this.isLoading = false;
             this.scope = ComponentScope.Solution;
@@ -415,6 +420,8 @@ export class ComponentsPacksWebviewMain {
         try {
             if (reload) {
                 this.availablePacksCache = {};
+                this.availablePacksCacheLoaded = false;
+                this.availablePacksIndexTimestamp = undefined;
                 this.unlinkRequests.clear();
                 await this.webviewManager.sendMessage({ type: 'SET_SOLUTION_STATE', stateMessage: 'Loading Solution data...' });
                 this.usedItems = await this.csolutionService.getUsedItems({ context: activeContext });
@@ -778,9 +785,10 @@ export class ComponentsPacksWebviewMain {
         }
     }
 
-    private async filterAvailablePacks(context: string) {
+    private async filterAvailablePacks(context: string): Promise<{ packs: Record<string, string>; indexTimestamp?: string }> {
         const allPacks = await this.csolutionService.getPacksInfo({ context: context, all: true });
-        const availablePacks = Object.fromEntries(await getLatestAvailablePacks());
+        const latestAvailablePacksInfo = await getLatestAvailablePacksInfo();
+        const availablePacks = Object.fromEntries(latestAvailablePacksInfo.packIds);
 
         // Build a Set for O(1) lookup
         const installedPackKeys = new Set(
@@ -799,16 +807,20 @@ export class ComponentsPacksWebviewMain {
                 return installedPackKeys.has(`${availablePack.vendor}:${availablePack.packName}`);
             })
         );
-        return filteredAvailablePacks;
+        return { packs: filteredAvailablePacks, indexTimestamp: latestAvailablePacksInfo.timestamp };
     }
 
     private async sendSolutionData(): Promise<void> {
         const activeContext = this.getActiveContext();
         const requestAll = this.scope === ComponentScope.All;
 
-        if (!this.availablePacksCache || Object.keys(this.availablePacksCache).length === 0) {
-            this.availablePacksCache = await this.filterAvailablePacks(activeContext);
+        if (!this.availablePacksCacheLoaded) {
+            const availablePacksInfo = await this.filterAvailablePacks(activeContext);
+            this.availablePacksCache = availablePacksInfo.packs;
+            this.availablePacksCacheLoaded = true;
+            this.availablePacksIndexTimestamp = availablePacksInfo.indexTimestamp;
         }
+        const availablePacksIndexCurrent = isPackIndexCurrent(this.availablePacksIndexTimestamp);
 
         this.componentTree = this.manageComponentsActions.mapComponentsFromService(await this.csolutionService.getComponentsTree({ context: activeContext, all: requestAll }));
         this.validations = await this.csolutionService.validateComponents({ context: activeContext });
@@ -847,6 +859,7 @@ export class ComponentsPacksWebviewMain {
                 relativePath: backToForwardSlashes(path.relative(dirname(this.solutionManager.getCsolution()?.solutionPath || ''), this.solutionManager.getCsolution()?.solutionPath || ''))
             },
             availablePacks: this.availablePacksCache,
+            availablePacksIndexCurrent,
             focusPackId,
         });
     }
@@ -1006,4 +1019,3 @@ const isSelectPackageMessage = (message: Messages.OutgoingMessage): message is M
 const isUnselectPackageMessage = (message: Messages.OutgoingMessage): message is Messages.OutgoingMessage & { target: string; packId: string } => {
     return message.type === 'UNSELECT_PACKAGE' && 'target' in message && 'packId' in message;
 };
-
